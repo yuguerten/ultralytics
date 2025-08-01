@@ -1,3 +1,8 @@
+## Note on this fork
+This fork contains modifications to the YOLO training methodology, allowing the use of knowledge distillation methods.
+
+---
+
 <div align="center">
   <p>
     <a href="https://www.ultralytics.com/blog/ultralytics-yolo11-has-arrived-redefine-whats-possible-in-ai" target="_blank">
