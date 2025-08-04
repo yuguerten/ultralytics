@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import distributed as dist
 from torch import nn, optim
 
@@ -55,6 +56,40 @@ from ultralytics.utils.torch_utils import (
     unset_deterministic,
 )
 
+class CWDLoss(nn.Module):
+    """PyTorch version of `Channel-wise Distillation for Semantic Segmentation.
+    <https://arxiv.org/abs/2011.13256>`_.
+    """
+
+    def __init__(self, channels_s, channels_t, T=4.0):
+        super().__init__()
+        self.T = T
+    
+    def forward(self, y_s, y_t):
+        """Forward computation
+        Args:
+            y_s (list): The student model prediction with shape (N, C, H, W) in list
+            y_t (list): The teacher model prediction with shape (N, C, H, W) in list
+        Return:
+            torch.Tensor: The calculated loss value of all stages
+        """
+        assert len(y_s) == len(y_t)
+        total_loss = 0.0
+
+        for idx, (s, t) in enumerate(zip(y_s,y_t)):
+            assert s.shape == t.shape
+            N, C, H, W = s.shape
+
+            softmax_pred_T = F.softmax(t.view(-1, W*H) / self.T, dim=1)
+            logsotmax = nn.LogSoftmax(dim=1)
+            cost = torch.sum(
+                softmax_pred_T * logsotmax(t.view(-1, W*H) / self.T) - 
+                softmax_pred_T * logsotmax(s.view(-1, W*H) / self.T)) * (self.T ** 2)
+            
+            layer_loss = cost / (C * N)
+            total_loss += layer_loss
+        
+        return total_loss
 
 class BaseTrainer:
     """
