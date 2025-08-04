@@ -142,6 +142,100 @@ class MGDLoss(nn.Module):
         dis_loss = loss_mse(new_fea, preds_T) / N
         return dis_loss
 
+class FeatureLoss(nn.Module):
+    def __init__(self, channels_s, channels_t, distiller='mgd', weight_loss=1.0):
+        super(FeatureLoss, self).__init__()
+        self.weight_loss = weight_loss
+        self.distiller = distiller
+
+        # Move all modules to the same precision
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+        # Convert to ModuleList and ensure consistent dtype
+        self.align_module = nn.ModuleList()
+        self.norm = nn.ModuleList()
+        self.norm1 = nn.ModuleList()
+
+        # Create alignment modules to reshape student feature maps into the same channel-dimensional space as the teacher
+        # raw student feature maps -> normalize them -> project their channels to teacher shape -> compute a stable, meaningful feature-level loss
+        for s_chan, t_chan in zip(channels_s, channels_t):
+            align = nn.Sequential(
+                    nn.Conv2d(s_chan, t_chan, kernel_size=1, stride=1, padding=0),
+                    nn.BatchNorm2d(t_chan, affine=False)
+                ).to(device)
+            self.align_module.append(align)
+
+        for t_chan in channels_t:
+            self.norm.append(nn.BatchNorm2d(t_chan, affine=False)).to(device)
+        for s_chan in channels_s:
+            self.norm1.append(nn.BatchNorm2d(s_chan, affine=False)).to(device)
+
+        if distiller == 'mgd':
+            self.feature_loss = MGDLoss(channels_s, channels_t)
+        elif distiller == 'cwd':
+            self.feature_loss = CWDLoss(channels_s, channels_t)
+        else:
+            raise NotImplementedError(f"Distiller '{distiller}' not implemented. Available: ['mgd', 'cwd']")
+    
+    def forward(self, y_s, y_t):
+        if len(y_s) != len(y_t):
+            y_t = y_t[len(y_t) // 2:]
+        
+        tea_feats = []
+        stu_feats = []
+
+        for idx, (s, t) in enumerate(zip(y_s, y_t)):
+            s = s.type(next(self.align_module[idx].parameters()).dtype)
+            t = t.type(next(self.align_module[idx].parameters()).dtype)
+
+            if self.distiller == "cwd":
+                s = self.align_module[idx](s)
+                stu_feats.append(s)
+                tea_feats.append(t.detach())
+            else:
+                s = self.norm1[idx](s)
+                t = self.norm[idx](t)
+
+                s = self.align_module[idx](s)
+
+                stu_feats.append(s)
+                tea_feats.append(t.detach())
+        
+        loss = self.feature_loss(stu_feats, tea_feats)
+        return self.weight_loss * loss
+
+class DistillationLoss:
+    def __init__(self, models, modelt, distiller="CWDLoss"):
+        """Args:
+                models: student model
+                modelt: teacher model
+        """
+        self.distiller = distiller
+        self.layers = ["6", "8", "13", "16", "19", "22"]
+        self.models = models
+        self.modelt = modelt
+
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        # warmup init
+        with torch.no_grad():
+            dummy_input = torch.randn(1, 3, 640, 640)
+            _ = self.models(dummy_input.to(device))
+            _ = self.modelt(dummy_input.to(device))
+        
+        self.channels_s = []
+        self.channels_t = []
+        self.teacher_module_pairs = []
+        self.student_module_pairs = []
+        self.remove_handle = []
+
+        self._find_layers()
+
+        self.distill_loss_fn = FeatureLoss(
+
+        )
+
+    def _find_layers(self):
+        pass
 
 class BaseTrainer:
     """
