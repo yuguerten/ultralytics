@@ -91,6 +91,58 @@ class CWDLoss(nn.Module):
         
         return total_loss
 
+class MGDLoss(nn.Module):
+    """
+    Pytorch version of `Masked Generative Distillation` "
+    <https://www.ecva.net/papers/eccv_2022/papers_ECCV/papers/136710053.pdf>
+    """
+    def __init__(self, student_channels, teacher_channels, alpha_mgd=0.00005, lambda_mgd=0.7):
+        super(MGDLoss, self).__init__()
+        self.alpha_mgd = alpha_mgd
+        self.lambda_mgd = lambda_mgd
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        
+        self.generation = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(channel, channel, kernel_size=3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(channel, channel, kernel_size=3, padding=1)
+            ).to(device) for channel in teacher_channels
+        ])
+    
+    def forward(self, y_s, y_t, layer=None):
+        """Forward computation.
+        Args:
+            y_s (list): The student model prediction with
+                shape (N, C, H, W) in list.
+            y_t (list): The teacher model prediction with
+                shape (N, C, H, W) in list.
+        Return:
+            torch.Tensor: The calculated loss value of all stages.
+        """
+        losses = []
+        for idx, (s, t) in enumerate(zip(y_s, y_t)):
+            if layer == "outlayer":
+                idx = -1
+            losses.append(self.get_dis_loss(s, t, idx) * self.alpha_mgd)
+            loss = sum(losses)
+        return loss
+    
+    def get_dis_loss(self, preds_S, preds_T, idx):
+        loss_mse = nn.MSELoss(reduction='sum')
+        N, C, H, W = preds_T.shape
+
+        device = preds_S.device
+        mat = torch.rand((N, 1, H, W)).to(device)
+        mat = torch.where(mat > 1 - self.lambda_mgd, 0, 1).to(device) # mask for student feature maps
+
+        masked_fea = torch.mal(preds_S, mat) # masked feature map
+        new_fea = self.generation[idx](masked_fea) # reconstracted feature map
+
+        dis_loss = loss_mse(new_fea, preds_T) / N
+        return dis_loss
+
+
 class BaseTrainer:
     """
     A base class for creating trainers.
