@@ -136,7 +136,7 @@ class MGDLoss(nn.Module):
         mat = torch.rand((N, 1, H, W)).to(device)
         mat = torch.where(mat > 1 - self.lambda_mgd, 0, 1).to(device) # mask for student feature maps
 
-        masked_fea = torch.mal(preds_S, mat) # masked feature map
+        masked_fea = torch.mul(preds_S, mat) # masked feature map
         new_fea = self.generation[idx](masked_fea) # reconstracted feature map
 
         dis_loss = loss_mse(new_fea, preds_T) / N
