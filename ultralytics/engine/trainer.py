@@ -231,11 +231,93 @@ class DistillationLoss:
         self._find_layers()
 
         self.distill_loss_fn = FeatureLoss(
-
+            channels_s=self.channels_s,
+            channels_t=self.channels_t,
+            distiller=distiller[:3]
         )
 
     def _find_layers(self):
-        pass
+        
+        self.channels_s = []
+        self.channels_t = []
+        self.teacher_module_pairs = []
+        self.student_module_pairs = []
+
+        for name, ml  in self.modelt.named_modules():
+            if name is not None:
+                name = name.split(".")
+                if name[0] != "module":
+                    continue
+                if len(name) >= 3:
+                    if name[1] in self.layers:
+                        if "cv2" in name[2]:
+                            if hasattr(ml, 'conv'):
+                                self.channels_t.append(ml.conv.out_channels)
+                                self.teacher_module_pairs.append(ml)
+        
+        nl = min(len(self.channels_s), len(self.channels_t))
+        self.channels_s = self.channels_s[-nl:]
+        self.channels_t = self.channels_t[-nl:]
+        self.teacher_module_pairs = self.teacher_module_pairs[-nl:]
+        self.student_module_pairs = self.student_module_pairs[-nl:]
+    
+    def register_hook(self):
+        """Each forward pass we register the results"""
+        # remove the existing hook if they exist
+        self.remove_handle_()
+
+        self.teacher_outputs = []
+        self.student_outputs = []
+
+        def make_student_hook(l):
+            def forward_hook(m, input, output):
+                if isinstance(output, torch.Tensor): # handle tensor outputs
+                    out = output.clone() # copy the tensor
+                    l.append(out)
+                else:
+                    # handle tuple / list outputs
+                    l.append([o.detach().clone() if isinstance(o, torch.Tensor) else o for o in output])
+            return forward_hook
+
+        def make_teacher_hook(l):
+            def forward_hook(m, input, output):
+                if isinstance(output, torch.Tensor):
+                    l.append(output.detach().clone())  # Detach and clone teacher outputs
+                else:
+                    l.append([o.detach().clone() if isinstance(o, torch.Tensor) else o for o in output])
+            return forward_hook
+        
+        for ml, ori in zip(self.teacher_module_pairs, self.student_module_pairs):
+            self.remove_handle.append(ml.register_forward_hook(make_teacher_hook(self.teacher_outputs)))
+            self.remove_handle.append(ori.register_forward_hook(make_student_hook(self.student_outputs)))
+        
+    def get_loss(self):
+        # check if we have both teacher and student outputs
+        if not self.teacher_outputs or not self.student_ouputs:
+            return torch.tensor(0, 0, requires_grad=True)
+        
+        # check if the number of outputs match
+        if len(self.teacher_outputs) != len(self.student_outputs):
+            print(f"Warning: Mismatched outputs - Teacher: {len(self.teacher_outputs)}, Student: {len(self.student_outputs)}")
+            return torch.tensor(0.0, requires_grad=True)
+
+        # calculate the loss
+        quant_loss = self.distill_loss_fn(y_s=self.student_outputs, y_t=self.teacher_outputs)
+
+        # apply the scaling to mgd approach
+        if self.distiller != 'cwd':
+            quant_loss *= 0.3
+        
+        # clear the output for the next interation
+        self.teacher_outputs.clear()
+        self.student_outputs.clear()
+
+        return quant_loss
+
+    def remove_handle_(self):
+        for rm in self.remove_handle:
+            rm.remove()
+            self.remove_handle.clear()
 
 class BaseTrainer:
     """
