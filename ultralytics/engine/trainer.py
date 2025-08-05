@@ -387,6 +387,18 @@ class BaseTrainer:
         self.validator = None
         self.metrics = None
         self.plots = {}
+
+        if overrides:
+            self.teacher = overrides.get("teacher", None)
+            self.loss_type = overrides.get("distillation_loss", None)
+            if "teacher" in overrides:
+                overrides.pop("teacher")
+            if "distillation_loss" in overrides:
+                overrides.pop("distillation_loss")
+            else:
+                self.loss_type = None
+                self.teacher = None
+
         init_seeds(self.args.seed + 1 + RANK, deterministic=self.args.deterministic)
 
         # Dirs
@@ -626,6 +638,11 @@ class BaseTrainer:
         if self.args.close_mosaic:
             base_idx = (self.epochs - self.args.close_mosaic) * nb
             self.plot_idx.extend([base_idx, base_idx + 1, base_idx + 2])
+        
+        # make the loss
+        if self.teacher is not None:
+            distillation_loss = DistillationLoss(self.model, self.teacher, distiller=self.loss_type)
+        
         epoch = self.start_epoch
         self.optimizer.zero_grad()  # zero any resumed gradients to ensure stability on train start
         while True:
@@ -673,6 +690,16 @@ class BaseTrainer:
                     self.tloss = (
                         (self.tloss * i + self.loss_items) / (i + 1) if self.tloss is not None else self.loss_items
                     )
+                # add mor distillation logic
+                if self.teacher is not None:
+                    distill_weight = ((1 - math.cos(i * math.pi / len(self.train_loader))) / 2) * (0.1 - 1) + 1
+                    with torch.no_grad():
+                        # LOGGER.info(f"\nTeacher input shape: {batch['img'].shape}")
+                        pred = self.teacher(batch['img'])
+                        
+                    self.d_loss = distillation_loss.get_loss()
+                    self.d_loss *= distill_weight
+                    self.loss += self.d_loss
 
                 # Backward
                 self.scaler.scale(self.loss).backward()
