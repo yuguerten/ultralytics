@@ -57,294 +57,351 @@ from ultralytics.utils.torch_utils import (
 )
 
 class CWDLoss(nn.Module):
-    """PyTorch version of `Channel-wise Distillation for Semantic Segmentation.
-    <https://arxiv.org/abs/2011.13256>`_.
+    """PyTorch version of Channel-wise Distillation (CWD) Loss.
+    Reference: https://arxiv.org/abs/2011.13256
     """
 
     def __init__(self, channels_s, channels_t, T=4.0):
         super().__init__()
+        # Temperature parameter for softening distributions
         self.T = T
-    
-    def forward(self, y_s, y_t):
-        """Forward computation
-        Args:
-            y_s (list): The student model prediction with shape (N, C, H, W) in list
-            y_t (list): The teacher model prediction with shape (N, C, H, W) in list
-        Return:
-            torch.Tensor: The calculated loss value of all stages
-        """
-        assert len(y_s) == len(y_t)
-        total_loss = 0.0
-        
 
-        for idx, (s, t) in enumerate(zip(y_s,y_t)):
-            assert s.shape == t.shape
+    def forward(self, y_s, y_t):
+        """
+        Compute channel-wise distillation loss over a list of feature maps.
+
+        Args:
+            y_s (list[Tensor]): Student outputs, each of shape (N, C, H, W).
+            y_t (list[Tensor]): Teacher outputs, each of shape (N, C, H, W).
+
+        Returns:
+            Tensor: Scalar loss averaged over all channels and batches.
+        """
+        assert len(y_s) == len(y_t), "Student and teacher feature lists must match in length"
+        total_loss = 0.0
+
+        # Loop over each corresponding pair of feature maps
+        for idx, (s, t) in enumerate(zip(y_s, y_t)):
+            assert s.shape == t.shape, f"Shape mismatch at stage {idx}: {s.shape} vs {t.shape}"
             N, C, H, W = s.shape
 
-            softmax_pred_T = F.softmax(t.view(-1, W*H) / self.T, dim=1)
-            logsotmax = nn.LogSoftmax(dim=1)
+            # Flatten spatial dims and apply temperature scaling to teacher logits
+            t_flat = t.view(-1, W * H) / self.T
+            # Teacher probability distribution (soft targets)
+            p_t = F.softmax(t_flat, dim=1)
+            # Log-softmax for computing KL divergence
+            logsoftmax = nn.LogSoftmax(dim=1)
+
+            # Compute element-wise cost: p_t * (log p_t - log p_s)
             cost = torch.sum(
-                softmax_pred_T * logsotmax(t.view(-1, W*H) / self.T) - 
-                softmax_pred_T * logsotmax(s.view(-1, W*H) / self.T)) * (self.T ** 2)
-            
+                p_t * logsoftmax(t_flat) -
+                p_t * logsoftmax(s.view(-1, W * H) / self.T)
+            ) * (self.T ** 2)
+
+            # Normalize by number of elements
             layer_loss = cost / (C * N)
             total_loss += layer_loss
-            
+
         return total_loss
+
 
 class MGDLoss(nn.Module):
     """
-    Pytorch version of `Masked Generative Distillation` "
-    <https://www.ecva.net/papers/eccv_2022/papers_ECCV/papers/136710053.pdf>
+    PyTorch version of Masked Generative Distillation (MGD).
+    Reference: https://www.ecva.net/papers/eccv_2022/papers_ECCV/papers/136710053.pdf
     """
+
     def __init__(self, student_channels, teacher_channels, alpha_mgd=0.00005, lambda_mgd=0.7):
-        super(MGDLoss, self).__init__()
+        super().__init__()
+        # Weight of MGD loss term
         self.alpha_mgd = alpha_mgd
+        # Masking threshold for generated noise patterns
         self.lambda_mgd = lambda_mgd
+
+        # Build a small generation network per feature stage to reconstruct teacher features
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        
         self.generation = nn.ModuleList([
             nn.Sequential(
-                nn.Conv2d(channel, channel, kernel_size=3, padding=1),
+                nn.Conv2d(ch, ch, kernel_size=3, padding=1),
                 nn.ReLU(inplace=True),
-                nn.Conv2d(channel, channel, kernel_size=3, padding=1)
-            ).to(device) for channel in teacher_channels
+                nn.Conv2d(ch, ch, kernel_size=3, padding=1)
+            ).to(device)
+            for ch in teacher_channels
         ])
-    
+
     def forward(self, y_s, y_t, layer=None):
-        """Forward computation.
+        """
+        Compute the MGD loss over stages, optionally focusing on output layer.
+
         Args:
-            y_s (list): The student model prediction with
-                shape (N, C, H, W) in list.
-            y_t (list): The teacher model prediction with
-                shape (N, C, H, W) in list.
-        Return:
-            torch.Tensor: The calculated loss value of all stages.
+            y_s (list[Tensor]): Student feature maps.
+            y_t (list[Tensor]): Teacher feature maps.
+            layer (str, optional): If "outlayer", only use last stage.
+
+        Returns:
+            Tensor: Weighted sum of reconstruction losses.
         """
         losses = []
         for idx, (s, t) in enumerate(zip(y_s, y_t)):
+            # If focusing only on the last layer, set idx = -1
             if layer == "outlayer":
                 idx = -1
+            # Compute reconstruction loss for this stage
             losses.append(self.get_dis_loss(s, t, idx) * self.alpha_mgd)
-            loss = sum(losses)
+
+        # Sum all stage losses
+        loss = sum(losses)
         return loss
-    
+
     def get_dis_loss(self, preds_S, preds_T, idx):
-        loss_mse = nn.MSELoss(reduction='sum')
+        """
+        Mask student features, reconstruct them, and compare with teacher via MSE.
+
+        Args:
+            preds_S (Tensor): Student features (N, C, H, W).
+            preds_T (Tensor): Teacher features (N, C, H, W).
+            idx (int): Index to select generation module.
+
+        Returns:
+            Tensor: Reconstruction loss normalized by batch size.
+        """
+        mse_loss = nn.MSELoss(reduction='sum')
         N, C, H, W = preds_T.shape
-
         device = preds_S.device
-        mat = torch.rand((N, 1, H, W)).to(device)
-        mat = torch.where(mat > 1 - self.lambda_mgd, 0, 1).to(device) # mask for student feature maps
 
-        masked_fea = torch.mul(preds_S, mat) # masked feature map
-        new_fea = self.generation[idx](masked_fea) # reconstracted feature map
+        # Create random mask: keep majority of features, zero out others
+        mask = torch.rand((N, 1, H, W), device=device)
+        mask = torch.where(mask > 1 - self.lambda_mgd, 0, 1)
 
-        dis_loss = loss_mse(new_fea, preds_T) / N
+        # Apply mask to student features
+        masked_fea = preds_S * mask
+        # Reconstruct full feature map via small generator network
+        reconstructed = self.generation[idx](masked_fea)
+
+        # Compare reconstructed features to teacher features
+        dis_loss = mse_loss(reconstructed, preds_T) / N
         return dis_loss
 
+
 class FeatureLoss(nn.Module):
+    """
+    Wrapper to align, normalize, and apply either MGD or CWD distillation.
+    """
+
     def __init__(self, channels_s, channels_t, distiller='mgd', weight_loss=1.0):
-        super(FeatureLoss, self).__init__()
+        super().__init__()
         self.weight_loss = weight_loss
         self.distiller = distiller
 
-        # Move all modules to the same precision
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-        # Convert to ModuleList and ensure consistent dtype
+        # Alignment modules to project student channels to teacher channels
         self.align_module = nn.ModuleList()
+        # Normalization layers for teacher and student before distance computation
         self.norm = nn.ModuleList()
         self.norm1 = nn.ModuleList()
 
-        # Create alignment modules to reshape student feature maps into the same channel-dimensional space as the teacher
-        # raw student feature maps -> normalize them -> project their channels to teacher shape -> compute a stable, meaningful feature-level loss
         for s_chan, t_chan in zip(channels_s, channels_t):
+            # 1x1 conv to match channel dimensions
             align = nn.Sequential(
-                    nn.Conv2d(s_chan, t_chan, kernel_size=1, stride=1, padding=0),
-                    nn.BatchNorm2d(t_chan, affine=False)
-                ).to(device)
+                nn.Conv2d(s_chan, t_chan, kernel_size=1, bias=False),
+                nn.BatchNorm2d(t_chan, affine=False)
+            ).to(device)
             self.align_module.append(align)
 
-        # Create normalization layers
+        # Teacher normalization only
         for t_chan in channels_t:
             self.norm.append(nn.BatchNorm2d(t_chan, affine=False).to(device))
-            
+        # Student normalization only
         for s_chan in channels_s:
             self.norm1.append(nn.BatchNorm2d(s_chan, affine=False).to(device))
 
+        # Select proper loss function
         if distiller == 'mgd':
             self.feature_loss = MGDLoss(channels_s, channels_t)
         elif distiller == 'cwd':
             self.feature_loss = CWDLoss(channels_s, channels_t)
         else:
-            raise NotImplementedError(f"Distiller '{distiller}' not implemented. Available: ['mgd', 'cwd']")
-    
+            raise NotImplementedError(f"Distiller '{distiller}' not implemented.")
+
     def forward(self, y_s, y_t):
+        """
+        Align and normalize student and teacher features, then compute distillation loss.
+
+        Args:
+            y_s (list[Tensor]): Student feature maps.
+            y_t (list[Tensor]): Teacher feature maps.
+
+        Returns:
+            Tensor: Weighted distillation loss.
+        """
+        # If teacher has more intermediate outputs, use only the last half
         if len(y_s) != len(y_t):
             y_t = y_t[len(y_t) // 2:]
-        
-        tea_feats = []
-        stu_feats = []
+
+        stu_feats, tea_feats = [], []
 
         for idx, (s, t) in enumerate(zip(y_s, y_t)):
-            s = s.type(next(self.align_module[idx].parameters()).dtype)
-            t = t.type(next(self.align_module[idx].parameters()).dtype)
+            # Cast to same dtype as alignment module
+            target_dtype = next(self.align_module[idx].parameters()).dtype
+            s = s.to(target_dtype)
+            t = t.to(target_dtype)
 
             if self.distiller == "cwd":
-                s = self.align_module[idx](s)
-                stu_feats.append(s)
+                # For CWD, simply align student features, teacher stays detached
+                s_aligned = self.align_module[idx](s)
+                stu_feats.append(s_aligned)
                 tea_feats.append(t.detach())
             else:
-                s = self.norm1[idx](s)
-                t = self.norm[idx](t)
+                # Normalize both streams before alignment for MGD
+                s_norm = self.norm1[idx](s)
+                t_norm = self.norm[idx](t)
+                s_aligned = self.align_module[idx](s_norm)
+                stu_feats.append(s_aligned)
+                tea_feats.append(t_norm.detach())
 
-                s = self.align_module[idx](s)
-
-                stu_feats.append(s)
-                tea_feats.append(t.detach())
-        
+        # Compute chosen feature-level loss
         loss = self.feature_loss(stu_feats, tea_feats)
         return self.weight_loss * loss
 
+
 class DistillationLoss:
+    """
+    Orchestrates hooking into student and teacher models,
+    gathers intermediate features, and computes the chosen distillation loss.
+    """
+
     def __init__(self, models, modelt, distiller="CWDLoss"):
-        """Args:
-                models: student model
-                modelt: teacher model
         """
-        self.distiller = distiller
+        Args:
+            models (nn.Module): Student network wrapped in DDP or nn.Module.
+            modelt (nn.Module): Teacher network wrapped similarly.
+            distiller (str): Either 'mgd' or 'cwd' (case-insensitive).
+        """
+        self.distiller = distiller.lower()
+        # Predefined layer indices to hook for feature extraction
         self.layers = ["6", "8", "13", "16", "19", "22"]
         self.models = models
         self.modelt = modelt
 
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        # warmup init
+        # Warm up one forward pass to build graph and ensure modules are instantiated
         with torch.no_grad():
-            dummy_input = torch.randn(1, 3, 640, 640)
-            _ = self.models(dummy_input.to(device))
-            _ = self.modelt(dummy_input.to(device))
-        
-        self.channels_s = []
-        self.channels_t = []
-        self.teacher_module_pairs = []
-        self.student_module_pairs = []
+            dummy = torch.randn(1, 3, 640, 640, device=device)
+            _ = self.models(dummy)
+            _ = self.modelt(dummy)
+
+        # Containers for layer channel counts and module references
+        self.channels_s, self.channels_t = [], []
+        self.student_module_pairs, self.teacher_module_pairs = [], []
         self.remove_handle = []
 
+        # Locate modules to hook in student and teacher
         self._find_layers()
 
+        # Initialize feature-level loss
         self.distill_loss_fn = FeatureLoss(
             channels_s=self.channels_s,
             channels_t=self.channels_t,
-            distiller=distiller[:3]
+            distiller=self.distiller
         )
 
     def _find_layers(self):
-        """Find the selected c3k2 blocks
-        How:
-                - Scan self.modelt.named_modules() and self.models.named_modules()
-                - Split each module name by '.' and check:
-                    • first token == 'module'
-                    • second token is in self.layers
-                    • third token contains 'cv2'
-                    • module has attribute 'conv'
-                - For each match, append the module to teacher_module_pairs/student_module_pairs
-                  and record its out_channels in channels_t/channels_s"""
-        self.channels_s = []
-        self.channels_t = []
-        self.teacher_module_pairs = []
-        self.student_module_pairs = []
+        """Scan both models for modules whose names match the selected layer IDs."""
+        # Teacher
+        for name, module in self.modelt.named_modules():
+            parts = name.split(".")
+            if len(parts) >= 3 and parts[0] == "module" and parts[1] in self.layers and "cv2" in parts[2]:
+                if hasattr(module, "conv"):
+                    self.channels_t.append(module.conv.out_channels)
+                    self.teacher_module_pairs.append(module)
 
-        # Find teacher layers
-        for name, ml in self.modelt.named_modules():
-            if name is not None:
-                name = name.split(".")
-                if name[0] != "module":
-                    continue
-                if len(name) >= 3:
-                    if name[1] in self.layers:
-                        if "cv2" in name[2]:
-                            if hasattr(ml, 'conv'):
-                                self.channels_t.append(ml.conv.out_channels)
-                                self.teacher_module_pairs.append(ml)
-        
-        # Find student layers
-        for name, ml in self.models.named_modules():
-            if name is not None:
-                name = name.split(".")
-                if name[0] != "module":
-                    continue
-                if len(name) >= 3:
-                    if name[1] in self.layers:
-                        if "cv2" in name[2]:
-                            if hasattr(ml, 'conv'):
-                                self.channels_s.append(ml.conv.out_channels)
-                                self.student_module_pairs.append(ml)
-    
+        # Student
+        for name, module in self.models.named_modules():
+            parts = name.split(".")
+            if len(parts) >= 3 and parts[0] == "module" and parts[1] in self.layers and "cv2" in parts[2]:
+                if hasattr(module, "conv"):
+                    self.channels_s.append(module.conv.out_channels)
+                    self.student_module_pairs.append(module)
+
+        # Keep only as many pairs as both streams have
         nl = min(len(self.channels_s), len(self.channels_t))
         self.channels_s = self.channels_s[-nl:]
         self.channels_t = self.channels_t[-nl:]
-        self.teacher_module_pairs = self.teacher_module_pairs[-nl:]
         self.student_module_pairs = self.student_module_pairs[-nl:]
+        self.teacher_module_pairs = self.teacher_module_pairs[-nl:]
 
     def register_hook(self):
-        """Each forward pass (iteration) we register the results"""
-        # remove the existing hook if they exist
+        """
+        Attach forward hooks to collect features from both models on each batch.
+        Must be called before each training epoch.
+        """
+        # Clear any existing hooks
         self.remove_handle_()
-    
+
         self.teacher_outputs = []
         self.student_outputs = []
 
-        def make_student_hook(l):
-            def forward_hook(m, input, output):
-                if isinstance(output, torch.Tensor): # handle tensor outputs
-                    out = output.clone() # copy the tensor
-                    l.append(out)
+        # Hook factory for student
+        def make_student_hook(storage):
+            def hook(module, inp, out):
+                # Clone and store the tensor output
+                if isinstance(out, torch.Tensor):
+                    storage.append(out.clone())
                 else:
-                    # handle tuple / list outputs
-                    l.append([o.detach().clone() if isinstance(o, torch.Tensor) else o for o in output])
-            return forward_hook
+                    # handle tuple/list of tensors
+                    storage.append([o.clone() for o in out if isinstance(o, torch.Tensor)])
+            return hook
 
-        def make_teacher_hook(l):
-            def forward_hook(m, input, output):
-                if isinstance(output, torch.Tensor):
-                    l.append(output.detach().clone())  # Detach and clone teacher outputs
+        # Hook factory for teacher
+        def make_teacher_hook(storage):
+            def hook(module, inp, out):
+                if isinstance(out, torch.Tensor):
+                    storage.append(out.detach().clone())
                 else:
-                    l.append([o.detach().clone() if isinstance(o, torch.Tensor) else o for o in output])
-            return forward_hook
-        
-        for ml, ori in zip(self.teacher_module_pairs, self.student_module_pairs):
-            self.remove_handle.append(ml.register_forward_hook(make_teacher_hook(self.teacher_outputs)))
-            self.remove_handle.append(ori.register_forward_hook(make_student_hook(self.student_outputs)))
-        
+                    storage.append([o.detach().clone() for o in out if isinstance(o, torch.Tensor)])
+            return hook
+
+        # Register hooks on matching module pairs
+        for t_mod, s_mod in zip(self.teacher_module_pairs, self.student_module_pairs):
+            self.remove_handle.append(
+                t_mod.register_forward_hook(make_teacher_hook(self.teacher_outputs))
+            )
+            self.remove_handle.append(
+                s_mod.register_forward_hook(make_student_hook(self.student_outputs))
+            )
+
     def get_loss(self):
-        # check if we have both teacher and student outputs
+        """
+        After a forward pass, compute the feature-level distillation loss,
+        clear stored outputs, and return the scalar loss tensor.
+        """
+        # Ensure we captured outputs
         if not self.teacher_outputs or not self.student_outputs:
-            return torch.tensor(0.0, requires_grad=True)
-        
-        # check if the number of outputs match
+            return torch.zeros(1, requires_grad=True, device=next(self.models.parameters()).device)
+
         if len(self.teacher_outputs) != len(self.student_outputs):
-            print(f"Warning: Mismatched outputs - Teacher: {len(self.teacher_outputs)}, Student: {len(self.student_outputs)}")
-            return torch.tensor(0.0, requires_grad=True)
+            # Fallback if mismatch
+            return torch.zeros(1, requires_grad=True, device=next(self.models.parameters()).device)
 
-        # calculate the loss
-        quant_loss = self.distill_loss_fn(y_s=self.student_outputs, y_t=self.teacher_outputs)
+        # Compute base distillation loss
+        loss = self.distill_loss_fn(self.student_outputs, self.teacher_outputs)
 
-        # apply the scaling to mgd approach
-        if self.distiller != 'cwd':
-            quant_loss *= 0.3
-        
-        # clear the output for the next interation
+        # For MGD, apply extra scaling factor
+        if self.distiller != "cwd":
+            loss *= 0.3
+
+        # Clear for next iteration
         self.teacher_outputs.clear()
         self.student_outputs.clear()
 
-        return quant_loss
+        return loss
 
     def remove_handle_(self):
-        """Remove all registered hooks"""
-        for rm in self.remove_handle:
-            rm.remove()
-        self.remove_handle.clear()  # Move clear() outside the loop
+        """Remove all forward hooks to avoid memory leaks."""
+        for handle in self.remove_handle:
+            handle.remove()
+        self.remove_handle.clear()
 
     def set_epoch(self, epoch):
         """Set current epoch for all distillation components."""
