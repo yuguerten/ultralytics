@@ -64,6 +64,17 @@ class CWDLoss(nn.Module):
     def __init__(self, channels_s, channels_t, T=4.0):
         super().__init__()
         self.T = T
+        # self.log_file = "cwd_debug_multires_log.txt"
+        
+        # # Better metrics tracking
+        # self.metrics_buffer = []
+        # self.epoch_metrics = {}
+        # self.forward_count = 0
+        # self.current_epoch = 0  # Start from 0, will be updated by trainer
+        
+        # # Initialize log file
+        # with open(self.log_file, "w") as f:
+        #     f.write("--- CWDLoss Debug Log ---\n")
     
     def forward(self, y_s, y_t):
         """Forward computation
@@ -75,6 +86,13 @@ class CWDLoss(nn.Module):
         """
         assert len(y_s) == len(y_t)
         total_loss = 0.0
+        
+        # # Collect metrics for this forward pass
+        # forward_metrics = {
+        #     'forward_pass': self.forward_count,
+        #     'layers': [],
+        #     'total_loss': 0.0
+        # }
 
         for idx, (s, t) in enumerate(zip(y_s,y_t)):
             assert s.shape == t.shape
@@ -88,8 +106,105 @@ class CWDLoss(nn.Module):
             
             layer_loss = cost / (C * N)
             total_loss += layer_loss
+            
+        #     # Store layer metrics
+        #     layer_metrics = {
+        #         'layer_idx': idx,
+        #         'student_shape': list(s.shape),
+        #         'teacher_shape': list(t.shape),
+        #         'layer_loss': float(layer_loss.item())
+        #     }
+        #     forward_metrics['layers'].append(layer_metrics)
         
+        # forward_metrics['total_loss'] = float(total_loss.item())
+        # self.metrics_buffer.append(forward_metrics)
+        # self.forward_count += 1
+        
+        # # Save metrics periodically (every epoch)
+        # if len(self.metrics_buffer) >= 2053:
+        #     self._save_buffered_metrics()
+            
         return total_loss
+        
+    # def _save_buffered_metrics(self):
+    #     """Save buffered metrics to file and clear buffer."""
+    #     import json
+    #     from datetime import datetime
+        
+    #     if not self.metrics_buffer:
+    #         return
+            
+    #     # Calculate aggregated statistics
+    #     total_losses = [m['total_loss'] for m in self.metrics_buffer]
+    #     layer_losses_by_idx = {}
+        
+    #     for metrics in self.metrics_buffer:
+    #         for layer in metrics['layers']:
+    #             idx = layer['layer_idx']
+    #             if idx not in layer_losses_by_idx:
+    #                 layer_losses_by_idx[idx] = []
+    #             layer_losses_by_idx[idx].append(layer['layer_loss'])
+        
+    #     # Prepare summary data
+    #     summary = {
+    #         'timestamp': datetime.now().isoformat(),
+    #         'epoch': self.current_epoch,
+    #         'forward_passes_count': len(self.metrics_buffer),
+    #         'total_loss_stats': {
+    #             'mean': sum(total_losses) / len(total_losses),
+    #             'min': min(total_losses),
+    #             'max': max(total_losses),
+    #             'last': total_losses[-1]
+    #         },
+    #         'layer_loss_stats': {}
+    #     }
+        
+    #     # Calculate per-layer statistics
+    #     for idx, losses in layer_losses_by_idx.items():
+    #         summary['layer_loss_stats'][f'layer_{idx}'] = {
+    #             'mean': sum(losses) / len(losses),
+    #             'min': min(losses),
+    #             'max': max(losses),
+    #             'count': len(losses)
+    #         }
+        
+    #     # Create output directory
+    #     from pathlib import Path
+    #     output_dir = Path("cwd_metrics_multires")
+    #     output_dir.mkdir(exist_ok=True)
+        
+    #     # Save to JSON file
+    #     epoch_num = max(1, self.current_epoch)  # Ensure minimum epoch number is 1 for filename
+    #     json_file = output_dir / f"cwd_metrics_epoch_{epoch_num:03d}.json"
+    #     try:
+    #         with open(json_file, 'w') as f:
+    #             json.dump(summary, f, indent=2)
+    #     except Exception as e:
+    #         print(f"Warning: Could not save CWD metrics to {json_file}: {e}")
+        
+    #     # Also append summary to the debug log
+    #     with open(self.log_file, "a") as f:
+    #         f.write(f"\n--- Epoch {self.current_epoch} Summary (Forward passes: {len(self.metrics_buffer)}) ---\n")
+    #         f.write(f"Mean Total Loss: {summary['total_loss_stats']['mean']:.6f}\n")
+    #         for layer_name, stats in summary['layer_loss_stats'].items():
+    #             f.write(f"{layer_name} Mean Loss: {stats['mean']:.6f}\n")
+    #         f.write(f"Saved detailed metrics to: {json_file}\n")
+        
+    #     # Clear buffer after saving
+    #     self.metrics_buffer.clear()
+    
+    # def set_epoch(self, epoch):
+    #     """Set current epoch for better metrics organization."""
+    #     if epoch != self.current_epoch:
+    #         # Save any remaining metrics from previous epoch
+    #         if self.metrics_buffer:
+    #             self._save_buffered_metrics()
+    #         self.current_epoch = epoch
+    
+    # def save_epoch_summary(self):
+    #     """Force save any remaining buffered metrics at epoch end."""
+    #     if self.metrics_buffer:
+    #         self._save_buffered_metrics()
 
 class MGDLoss(nn.Module):
     """
@@ -165,8 +280,10 @@ class FeatureLoss(nn.Module):
                 ).to(device)
             self.align_module.append(align)
 
+        # Create normalization layers
         for t_chan in channels_t:
             self.norm.append(nn.BatchNorm2d(t_chan, affine=False).to(device))
+            
         for s_chan in channels_s:
             self.norm1.append(nn.BatchNorm2d(s_chan, affine=False).to(device))
 
@@ -333,6 +450,16 @@ class DistillationLoss:
             rm.remove()
         self.remove_handle.clear()  # Move clear() outside the loop
 
+    def set_epoch(self, epoch):
+        """Set current epoch for all distillation components."""
+        if hasattr(self.distill_loss_fn, 'feature_loss') and hasattr(self.distill_loss_fn.feature_loss, 'set_epoch'):
+            self.distill_loss_fn.feature_loss.set_epoch(epoch)
+    
+    def save_epoch_summary(self):
+        """Save epoch summary for all distillation components."""
+        if hasattr(self.distill_loss_fn, 'feature_loss') and hasattr(self.distill_loss_fn.feature_loss, 'save_epoch_summary'):
+            self.distill_loss_fn.feature_loss.save_epoch_summary()
+
 class BaseTrainer:
     """
     A base class for creating trainers.
@@ -393,19 +520,15 @@ class BaseTrainer:
             overrides (dict, optional): Configuration overrides.
             _callbacks (list, optional): List of callback functions.
         """
-        # Extract custom arguments before cfg validation
+        self.args = get_cfg(cfg, overrides)
+        
+        # Extract custom arguments after cfg validation
         if overrides:
             self.teacher = overrides.get("teacher", None)
             self.loss_type = overrides.get("distillation_loss", None)
-            # Remove custom arguments from overrides to avoid validation errors
-            overrides = overrides.copy()  # Don't modify the original dict
-            overrides.pop("teacher", None)
-            overrides.pop("distillation_loss", None)
         else:
             self.loss_type = None
             self.teacher = None
-            
-        self.args = get_cfg(cfg, overrides)
         self.check_resume(overrides)
         self.device = select_device(self.args.device, self.args.batch)
         # Update "-1" devices so post-training val does not repeat search
@@ -423,7 +546,7 @@ class BaseTrainer:
         if RANK in {-1, 0}:
             self.wdir.mkdir(parents=True, exist_ok=True)  # make dir
             self.args.save_dir = str(self.save_dir)
-            # YAML(self.save_dir / "args.yaml", vars(self.args))  # save run args
+            YAML.save(self.save_dir / "args.yaml", vars(self.args))  # save run args
         self.last, self.best = self.wdir / "last.pt", self.wdir / "best.pt"  # checkpoint paths
         self.save_period = self.args.save_period
 
@@ -440,7 +563,7 @@ class BaseTrainer:
         # Model and Dataset
         self.model = check_model_file_from_stem(self.args.model)  # add suffix, i.e. yolo11n -> yolo11n.pt
         with torch_distributed_zero_first(LOCAL_RANK):  # avoid auto-downloading dataset multiple times
-            self.data = self.get_dataset()
+            self.trainset, self.testset = self.get_dataset()
 
         self.ema = None
 
@@ -543,6 +666,13 @@ class BaseTrainer:
         self.run_callbacks("on_pretrain_routine_start")
         ckpt = self.setup_model()
         self.model = self.model.to(self.device)
+        
+        # Load teacher model to device
+        if self.teacher is not None:
+            for k, v in self.teacher.named_parameters():
+                v.requires_grad = True
+            self.teacher = self.teacher.to(self.device)
+
         self.set_model_attributes()
 
         # Freeze layers
@@ -582,6 +712,10 @@ class BaseTrainer:
         )
         if world_size > 1:
             self.model = nn.parallel.DistributedDataParallel(self.model, device_ids=[RANK], find_unused_parameters=True)
+            
+            if self.teacher is not None:
+                self.teacher = nn.parallel.DistributedDataParallel(self.teacher, device_ids=[RANK])
+                temp = self.teacher.eval()
 
         # Check imgsz
         gs = max(int(self.model.stride.max() if hasattr(self.model, "stride") else 32), 32)  # grid size (max stride)
@@ -595,15 +729,12 @@ class BaseTrainer:
         # Dataloaders
         batch_size = self.batch_size // max(world_size, 1)
         self.train_loader = self.get_dataloader(
-            self.data["train"], batch_size=batch_size, rank=LOCAL_RANK, mode="train"
+            self.trainset, batch_size=batch_size, rank=LOCAL_RANK, mode="train"
         )
         if RANK in {-1, 0}:
             # Note: When training DOTA dataset, double batch size could get OOM on images with >2000 objects.
             self.test_loader = self.get_dataloader(
-                self.data.get("val") or self.data.get("test"),
-                batch_size=batch_size if self.args.task == "obb" else batch_size * 2,
-                rank=-1,
-                mode="val",
+                self.testset, batch_size=batch_size if self.args.task == "obb" else batch_size * 2, rank=-1, mode="val"
             )
             self.validator = self.get_validator()
             metric_keys = self.validator.metrics.keys + self.label_loss_items(prefix="val")
@@ -618,6 +749,7 @@ class BaseTrainer:
         iterations = math.ceil(len(self.train_loader.dataset) / max(self.batch_size, self.args.nbs)) * self.epochs
         self.optimizer = self.build_optimizer(
             model=self.model,
+            teacher=self.teacher,
             name=self.args.optimizer,
             lr=self.args.lr0,
             momentum=self.args.momentum,
@@ -654,7 +786,7 @@ class BaseTrainer:
             base_idx = (self.epochs - self.args.close_mosaic) * nb
             self.plot_idx.extend([base_idx, base_idx + 1, base_idx + 2])
         
-        # make the loss
+        # make loss
         if self.teacher is not None:
             self.distillation_loss = DistillationLoss(self.model, self.teacher, distiller=self.loss_type)
         else:
@@ -665,6 +797,11 @@ class BaseTrainer:
         while True:
             self.epoch = epoch
             self.run_callbacks("on_train_epoch_start")
+            
+            # Set epoch for distillation loss components
+            if self.teacher is not None:
+                self.distillation_loss.set_epoch(epoch + 1)  # +1 because epoch starts from 0 but we want to display from 1
+                
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")  # suppress 'Detected lr_scheduler.step() before optimizer.step()'
                 self.scheduler.step()
@@ -760,6 +897,12 @@ class BaseTrainer:
 
                 self.run_callbacks("on_train_batch_end")
 
+            # More distillation logic
+            if self.teacher is not None:
+                self.distillation_loss.remove_handle_()
+                # Save epoch summary for CWD metrics
+                self.distillation_loss.save_epoch_summary()
+
             self.lr = {f"lr/pg{ir}": x["lr"] for ir, x in enumerate(self.optimizer.param_groups)}  # for loggers
             self.run_callbacks("on_train_epoch_end")
             if RANK in {-1, 0}:
@@ -811,6 +954,8 @@ class BaseTrainer:
                 self.plot_metrics()
             self.run_callbacks("on_train_end")
         self._clear_memory()
+        
+        # Distill logic
         if self.teacher is not None:
             self.distillation_loss.remove_handle_()
         unset_deterministic()
@@ -904,10 +1049,9 @@ class BaseTrainer:
 
     def get_dataset(self):
         """
-        Get train and validation datasets from data dictionary.
+        Get train, val path from data dict if it exists.
 
-        Returns:
-            (dict): A dictionary containing the training/validation/test dataset and category names.
+        Returns None if data format is not recognized.
         """
         try:
             if self.args.task == "classify":
@@ -927,7 +1071,8 @@ class BaseTrainer:
             LOGGER.info("Overriding class names with single class.")
             data["names"] = {0: "item"}
             data["nc"] = 1
-        return data
+        self.data = data
+        return data["train"], data.get("val") or data.get("test")
 
     def setup_model(self):
         """
@@ -1124,12 +1269,13 @@ class BaseTrainer:
             LOGGER.info("Closing dataloader mosaic")
             self.train_loader.dataset.close_mosaic(hyp=copy(self.args))
 
-    def build_optimizer(self, model, name="auto", lr=0.001, momentum=0.9, decay=1e-5, iterations=1e5):
+    def build_optimizer(self, model, teacher=None, name="auto", lr=0.001, momentum=0.9, decay=1e-5, iterations=1e5):
         """
         Construct an optimizer for the given model.
 
         Args:
             model (torch.nn.Module): The model for which to build an optimizer.
+            teacher (torch.nn.Module): The teacher model that will help the model to improve.
             name (str, optional): The name of the optimizer to use. If 'auto', the optimizer is selected
                 based on the number of iterations.
             lr (float, optional): The learning rate for the optimizer.
@@ -1164,6 +1310,15 @@ class BaseTrainer:
                     g[1].append(param)
                 else:  # weight (with decay)
                     g[0].append(param)
+                    
+        if teacher is not None:
+            for v in teacher.modules():
+                if hasattr(v, 'bias') and isinstance(v.bias, nn.Parameter):
+                    g[2].append(v.bias)
+                if isinstance(v, bn):  # weight (no decay)
+                    g[1].append(v.weight)
+                elif hasattr(v, 'weight') and isinstance(v.weight, nn.Parameter):  # weight (with decay)
+                    g[0].append(v.weight)
 
         optimizers = {"Adam", "Adamax", "AdamW", "NAdam", "RAdam", "RMSProp", "SGD", "auto"}
         name = {x.lower(): x for x in optimizers}.get(name.lower())
