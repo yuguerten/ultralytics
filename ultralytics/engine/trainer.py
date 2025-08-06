@@ -240,6 +240,16 @@ class DistillationLoss:
         )
 
     def _find_layers(self):
+        """Find the selected c3k2 blocks
+        How:
+                - Scan self.modelt.named_modules() and self.models.named_modules()
+                - Split each module name by '.' and check:
+                    • first token == 'module'
+                    • second token is in self.layers
+                    • third token contains 'cv2'
+                    • module has attribute 'conv'
+                - For each match, append the module to teacher_module_pairs/student_module_pairs
+                  and record its out_channels in channels_t/channels_s"""
         self.channels_s = []
         self.channels_t = []
         self.teacher_module_pairs = []
@@ -258,7 +268,7 @@ class DistillationLoss:
                                 self.channels_t.append(ml.conv.out_channels)
                                 self.teacher_module_pairs.append(ml)
         
-        # Find student layers - ADD THIS MISSING PART
+        # Find student layers
         for name, ml in self.models.named_modules():
             if name is not None:
                 name = name.split(".")
@@ -278,9 +288,9 @@ class DistillationLoss:
         self.student_module_pairs = self.student_module_pairs[-nl:]
 
     def register_hook(self):
-        """Each forward pass we register the results"""
+        """Each forward pass (iteration) we register the results"""
         # remove the existing hook if they exist
-        self.remove_handle_()  # This should work now
+        self.remove_handle_()
     
         self.teacher_outputs = []
         self.student_outputs = []
