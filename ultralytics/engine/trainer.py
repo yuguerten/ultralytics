@@ -64,17 +64,6 @@ class CWDLoss(nn.Module):
     def __init__(self, channels_s, channels_t, T=4.0):
         super().__init__()
         self.T = T
-        # self.log_file = "cwd_debug_multires_log.txt"
-        
-        # # Better metrics tracking
-        # self.metrics_buffer = []
-        # self.epoch_metrics = {}
-        # self.forward_count = 0
-        # self.current_epoch = 0  # Start from 0, will be updated by trainer
-        
-        # # Initialize log file
-        # with open(self.log_file, "w") as f:
-        #     f.write("--- CWDLoss Debug Log ---\n")
     
     def forward(self, y_s, y_t):
         """Forward computation
@@ -87,12 +76,6 @@ class CWDLoss(nn.Module):
         assert len(y_s) == len(y_t)
         total_loss = 0.0
         
-        # # Collect metrics for this forward pass
-        # forward_metrics = {
-        #     'forward_pass': self.forward_count,
-        #     'layers': [],
-        #     'total_loss': 0.0
-        # }
 
         for idx, (s, t) in enumerate(zip(y_s,y_t)):
             assert s.shape == t.shape
@@ -107,104 +90,7 @@ class CWDLoss(nn.Module):
             layer_loss = cost / (C * N)
             total_loss += layer_loss
             
-        #     # Store layer metrics
-        #     layer_metrics = {
-        #         'layer_idx': idx,
-        #         'student_shape': list(s.shape),
-        #         'teacher_shape': list(t.shape),
-        #         'layer_loss': float(layer_loss.item())
-        #     }
-        #     forward_metrics['layers'].append(layer_metrics)
-        
-        # forward_metrics['total_loss'] = float(total_loss.item())
-        # self.metrics_buffer.append(forward_metrics)
-        # self.forward_count += 1
-        
-        # # Save metrics periodically (every epoch)
-        # if len(self.metrics_buffer) >= 2053:
-        #     self._save_buffered_metrics()
-            
         return total_loss
-        
-    # def _save_buffered_metrics(self):
-    #     """Save buffered metrics to file and clear buffer."""
-    #     import json
-    #     from datetime import datetime
-        
-    #     if not self.metrics_buffer:
-    #         return
-            
-    #     # Calculate aggregated statistics
-    #     total_losses = [m['total_loss'] for m in self.metrics_buffer]
-    #     layer_losses_by_idx = {}
-        
-    #     for metrics in self.metrics_buffer:
-    #         for layer in metrics['layers']:
-    #             idx = layer['layer_idx']
-    #             if idx not in layer_losses_by_idx:
-    #                 layer_losses_by_idx[idx] = []
-    #             layer_losses_by_idx[idx].append(layer['layer_loss'])
-        
-    #     # Prepare summary data
-    #     summary = {
-    #         'timestamp': datetime.now().isoformat(),
-    #         'epoch': self.current_epoch,
-    #         'forward_passes_count': len(self.metrics_buffer),
-    #         'total_loss_stats': {
-    #             'mean': sum(total_losses) / len(total_losses),
-    #             'min': min(total_losses),
-    #             'max': max(total_losses),
-    #             'last': total_losses[-1]
-    #         },
-    #         'layer_loss_stats': {}
-    #     }
-        
-    #     # Calculate per-layer statistics
-    #     for idx, losses in layer_losses_by_idx.items():
-    #         summary['layer_loss_stats'][f'layer_{idx}'] = {
-    #             'mean': sum(losses) / len(losses),
-    #             'min': min(losses),
-    #             'max': max(losses),
-    #             'count': len(losses)
-    #         }
-        
-    #     # Create output directory
-    #     from pathlib import Path
-    #     output_dir = Path("cwd_metrics_multires")
-    #     output_dir.mkdir(exist_ok=True)
-        
-    #     # Save to JSON file
-    #     epoch_num = max(1, self.current_epoch)  # Ensure minimum epoch number is 1 for filename
-    #     json_file = output_dir / f"cwd_metrics_epoch_{epoch_num:03d}.json"
-    #     try:
-    #         with open(json_file, 'w') as f:
-    #             json.dump(summary, f, indent=2)
-    #     except Exception as e:
-    #         print(f"Warning: Could not save CWD metrics to {json_file}: {e}")
-        
-    #     # Also append summary to the debug log
-    #     with open(self.log_file, "a") as f:
-    #         f.write(f"\n--- Epoch {self.current_epoch} Summary (Forward passes: {len(self.metrics_buffer)}) ---\n")
-    #         f.write(f"Mean Total Loss: {summary['total_loss_stats']['mean']:.6f}\n")
-    #         for layer_name, stats in summary['layer_loss_stats'].items():
-    #             f.write(f"{layer_name} Mean Loss: {stats['mean']:.6f}\n")
-    #         f.write(f"Saved detailed metrics to: {json_file}\n")
-        
-    #     # Clear buffer after saving
-    #     self.metrics_buffer.clear()
-    
-    # def set_epoch(self, epoch):
-    #     """Set current epoch for better metrics organization."""
-    #     if epoch != self.current_epoch:
-    #         # Save any remaining metrics from previous epoch
-    #         if self.metrics_buffer:
-    #             self._save_buffered_metrics()
-    #         self.current_epoch = epoch
-    
-    # def save_epoch_summary(self):
-    #     """Force save any remaining buffered metrics at epoch end."""
-    #     if self.metrics_buffer:
-    #         self._save_buffered_metrics()
 
 class MGDLoss(nn.Module):
     """
