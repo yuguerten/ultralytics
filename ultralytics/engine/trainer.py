@@ -166,9 +166,9 @@ class FeatureLoss(nn.Module):
             self.align_module.append(align)
 
         for t_chan in channels_t:
-            self.norm.append(nn.BatchNorm2d(t_chan, affine=False)).to(device)
+            self.norm.append(nn.BatchNorm2d(t_chan, affine=False).to(device))
         for s_chan in channels_s:
-            self.norm1.append(nn.BatchNorm2d(s_chan, affine=False)).to(device)
+            self.norm1.append(nn.BatchNorm2d(s_chan, affine=False).to(device))
 
         if distiller == 'mgd':
             self.feature_loss = MGDLoss(channels_s, channels_t)
@@ -237,13 +237,13 @@ class DistillationLoss:
         )
 
     def _find_layers(self):
-        
         self.channels_s = []
         self.channels_t = []
         self.teacher_module_pairs = []
         self.student_module_pairs = []
 
-        for name, ml  in self.modelt.named_modules():
+        # Find teacher layers
+        for name, ml in self.modelt.named_modules():
             if name is not None:
                 name = name.split(".")
                 if name[0] != "module":
@@ -255,17 +255,30 @@ class DistillationLoss:
                                 self.channels_t.append(ml.conv.out_channels)
                                 self.teacher_module_pairs.append(ml)
         
+        # Find student layers - ADD THIS MISSING PART
+        for name, ml in self.models.named_modules():
+            if name is not None:
+                name = name.split(".")
+                if name[0] != "module":
+                    continue
+                if len(name) >= 3:
+                    if name[1] in self.layers:
+                        if "cv2" in name[2]:
+                            if hasattr(ml, 'conv'):
+                                self.channels_s.append(ml.conv.out_channels)
+                                self.student_module_pairs.append(ml)
+    
         nl = min(len(self.channels_s), len(self.channels_t))
         self.channels_s = self.channels_s[-nl:]
         self.channels_t = self.channels_t[-nl:]
         self.teacher_module_pairs = self.teacher_module_pairs[-nl:]
         self.student_module_pairs = self.student_module_pairs[-nl:]
-    
+
     def register_hook(self):
         """Each forward pass we register the results"""
         # remove the existing hook if they exist
-        self.remove_handle_()
-
+        self.remove_handle_()  # This should work now
+    
         self.teacher_outputs = []
         self.student_outputs = []
 
@@ -293,8 +306,8 @@ class DistillationLoss:
         
     def get_loss(self):
         # check if we have both teacher and student outputs
-        if not self.teacher_outputs or not self.student_ouputs:
-            return torch.tensor(0, 0, requires_grad=True)
+        if not self.teacher_outputs or not self.student_outputs:
+            return torch.tensor(0.0, requires_grad=True)
         
         # check if the number of outputs match
         if len(self.teacher_outputs) != len(self.student_outputs):
@@ -315,9 +328,10 @@ class DistillationLoss:
         return quant_loss
 
     def remove_handle_(self):
+        """Remove all registered hooks"""
         for rm in self.remove_handle:
             rm.remove()
-            self.remove_handle.clear()
+        self.remove_handle.clear()  # Move clear() outside the loop
 
 class BaseTrainer:
     """
@@ -379,6 +393,18 @@ class BaseTrainer:
             overrides (dict, optional): Configuration overrides.
             _callbacks (list, optional): List of callback functions.
         """
+        # Extract custom arguments before cfg validation
+        if overrides:
+            self.teacher = overrides.get("teacher", None)
+            self.loss_type = overrides.get("distillation_loss", None)
+            # Remove custom arguments from overrides to avoid validation errors
+            overrides = overrides.copy()  # Don't modify the original dict
+            overrides.pop("teacher", None)
+            overrides.pop("distillation_loss", None)
+        else:
+            self.loss_type = None
+            self.teacher = None
+            
         self.args = get_cfg(cfg, overrides)
         self.check_resume(overrides)
         self.device = select_device(self.args.device, self.args.batch)
@@ -387,18 +413,7 @@ class BaseTrainer:
         self.validator = None
         self.metrics = None
         self.plots = {}
-
-        if overrides:
-            self.teacher = overrides.get("teacher", None)
-            self.loss_type = overrides.get("distillation_loss", None)
-            if "teacher" in overrides:
-                overrides.pop("teacher")
-            if "distillation_loss" in overrides:
-                overrides.pop("distillation_loss")
-            else:
-                self.loss_type = None
-                self.teacher = None
-
+        
         init_seeds(self.args.seed + 1 + RANK, deterministic=self.args.deterministic)
 
         # Dirs
@@ -408,7 +423,7 @@ class BaseTrainer:
         if RANK in {-1, 0}:
             self.wdir.mkdir(parents=True, exist_ok=True)  # make dir
             self.args.save_dir = str(self.save_dir)
-            YAML.save(self.save_dir / "args.yaml", vars(self.args))  # save run args
+            # YAML(self.save_dir / "args.yaml", vars(self.args))  # save run args
         self.last, self.best = self.wdir / "last.pt", self.wdir / "best.pt"  # checkpoint paths
         self.save_period = self.args.save_period
 
@@ -641,7 +656,9 @@ class BaseTrainer:
         
         # make the loss
         if self.teacher is not None:
-            distillation_loss = DistillationLoss(self.model, self.teacher, distiller=self.loss_type)
+            self.distillation_loss = DistillationLoss(self.model, self.teacher, distiller=self.loss_type)
+        else:
+            self.distillation_loss = None
         
         epoch = self.start_epoch
         self.optimizer.zero_grad()  # zero any resumed gradients to ensure stability on train start
@@ -665,6 +682,11 @@ class BaseTrainer:
                 LOGGER.info(self.progress_string())
                 pbar = TQDM(enumerate(self.train_loader), total=nb)
             self.tloss = None
+            
+            # Register distillation hooks for this epoch
+            if self.teacher is not None:
+                self.distillation_loss.register_hook()
+                
             for i, batch in pbar:
                 self.run_callbacks("on_train_batch_start")
                 # Warmup
@@ -697,7 +719,7 @@ class BaseTrainer:
                         # LOGGER.info(f"\nTeacher input shape: {batch['img'].shape}")
                         pred = self.teacher(batch['img'])
                         
-                    self.d_loss = distillation_loss.get_loss()
+                    self.d_loss = self.distillation_loss.get_loss()
                     self.d_loss *= distill_weight
                     self.loss += self.d_loss
 
@@ -789,6 +811,8 @@ class BaseTrainer:
                 self.plot_metrics()
             self.run_callbacks("on_train_end")
         self._clear_memory()
+        if self.teacher is not None:
+            self.distillation_loss.remove_handle_()
         unset_deterministic()
         self.run_callbacks("teardown")
 
