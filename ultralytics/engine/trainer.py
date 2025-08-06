@@ -857,7 +857,7 @@ class BaseTrainer:
                         pred = self.teacher(batch['img'])
                         
                     self.d_loss = self.distillation_loss.get_loss()
-                    self.d_loss *= distill_weight
+                    self.d_loss = self.d_loss * distill_weight
                     self.loss += self.d_loss
 
                 # Backward
