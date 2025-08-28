@@ -312,7 +312,8 @@ class DistillationLoss:
         # Teacher
         for name, module in self.modelt.named_modules():
             parts = name.split(".")
-            if len(parts) >= 3 and parts[0] == "module" and parts[1] in self.layers and "cv2" in parts[2]:
+            # Check for both "module.X.cv2" (DDP) and "model.X.cv2" (non-DDP) patterns
+            if len(parts) >= 3 and parts[0] in ["module", "model"] and parts[1] in self.layers and "cv2" in parts[2]:
                 if hasattr(module, "conv"):
                     self.channels_t.append(module.conv.out_channels)
                     self.teacher_module_pairs.append(module)
@@ -320,13 +321,15 @@ class DistillationLoss:
         # Student
         for name, module in self.models.named_modules():
             parts = name.split(".")
-            if len(parts) >= 3 and parts[0] == "module" and parts[1] in self.layers and "cv2" in parts[2]:
+            # Check for both "module.X.cv2" (DDP) and "model.X.cv2" (non-DDP) patterns
+            if len(parts) >= 3 and parts[0] in ["module", "model"] and parts[1] in self.layers and "cv2" in parts[2]:
                 if hasattr(module, "conv"):
                     self.channels_s.append(module.conv.out_channels)
                     self.student_module_pairs.append(module)
 
         # Keep only as many pairs as both streams have
         nl = min(len(self.channels_s), len(self.channels_t))
+        
         self.channels_s = self.channels_s[-nl:]
         self.channels_t = self.channels_t[-nl:]
         self.student_module_pairs = self.student_module_pairs[-nl:]
@@ -807,13 +810,21 @@ class BaseTrainer:
                 if self.teacher is not None:
                     distill_weight = ((1 - math.cos(i * math.pi / len(self.train_loader))) / 2) * (0.1 - 1) + 1
                     with torch.no_grad():
-                        # LOGGER.info(f"\nTeacher input shape: {batch['img'].shape}")
                         pred = self.teacher(batch['img'])
                         
+                    # Debug: Check if features are being captured
+                    print(f"Teacher outputs length: {len(self.distillation_loss.teacher_outputs)}")
+                    print(f"Student outputs length: {len(self.distillation_loss.student_outputs)}")
+                    
                     self.d_loss = self.distillation_loss.get_loss()
+                    
+                    # Debug: Check the actual loss value before weighting
+                    print(f"Raw distillation loss: {self.d_loss}")
+                    
                     self.d_loss = self.d_loss * distill_weight
-                    # print(f"val of loss: {self.loss}, val of d_loss: {self.d_loss[0]}")
-                    self.loss += self.d_loss[0]
+                    print(f"value of loss: {self.loss}, value of d_loss: {self.d_loss.squeeze()}")
+                    self.loss += self.d_loss.squeeze()
+                    # exit()
 
                 # Backward
                 self.scaler.scale(self.loss).backward()

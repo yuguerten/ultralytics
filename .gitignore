@@ -175,4 +175,4 @@ pnnx*
 # calibration image
 calibration_*.npy
 
-object_tra*
+object_tracker.py
