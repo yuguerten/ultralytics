@@ -125,7 +125,7 @@ class MGDLoss(nn.Module):
                 nn.Conv2d(ch, ch, kernel_size=3, padding=1),
                 nn.ReLU(inplace=True),
                 nn.Conv2d(ch, ch, kernel_size=3, padding=1)
-            ).to(device)
+            ).to(device, non_blocking=True)
             for ch in teacher_channels
         ])
 
@@ -211,10 +211,10 @@ class FeatureLoss(nn.Module):
 
         # Teacher normalization only
         for t_chan in channels_t:
-            self.norm.append(nn.BatchNorm2d(t_chan, affine=False).to(device))
+            self.norm.append(nn.BatchNorm2d(t_chan, affine=False).to(device, non_blocking=True))
         # Student normalization only
         for s_chan in channels_s:
-            self.norm1.append(nn.BatchNorm2d(s_chan, affine=False).to(device))
+            self.norm1.append(nn.BatchNorm2d(s_chan, affine=False).to(device, non_blocking=True))
 
         # Select proper loss function
         if distiller == 'mgd':
@@ -244,6 +244,7 @@ class FeatureLoss(nn.Module):
         for idx, (s, t) in enumerate(zip(y_s, y_t)):
             # Cast to same dtype as alignment module
             target_dtype = next(self.align_module[idx].parameters()).dtype
+            LOGGER.info(f"target dtype: {target_dtype}")
             s = s.to(target_dtype)
             t = t.to(target_dtype)
 
@@ -811,7 +812,8 @@ class BaseTrainer:
                         
                     self.d_loss = self.distillation_loss.get_loss()
                     self.d_loss = self.d_loss * distill_weight
-                    self.loss += self.d_loss
+                    # print(f"val of loss: {self.loss}, val of d_loss: {self.d_loss[0]}")
+                    self.loss += self.d_loss[0]
 
                 # Backward
                 self.scaler.scale(self.loss).backward()
