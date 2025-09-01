@@ -244,7 +244,6 @@ class FeatureLoss(nn.Module):
         for idx, (s, t) in enumerate(zip(y_s, y_t)):
             # Cast to same dtype as alignment module
             target_dtype = next(self.align_module[idx].parameters()).dtype
-            LOGGER.info(f"target dtype: {target_dtype}")
             s = s.to(target_dtype)
             t = t.to(target_dtype)
 
@@ -627,7 +626,7 @@ class BaseTrainer:
         # Load teacher model to device
         if self.teacher is not None:
             for k, v in self.teacher.named_parameters():
-                v.requires_grad = True
+                v.requires_grad = False
             self.teacher = self.teacher.to(self.device)
 
         self.set_model_attributes()
@@ -812,19 +811,11 @@ class BaseTrainer:
                     with torch.no_grad():
                         pred = self.teacher(batch['img'])
                         
-                    # Debug: Check if features are being captured
-                    print(f"Teacher outputs length: {len(self.distillation_loss.teacher_outputs)}")
-                    print(f"Student outputs length: {len(self.distillation_loss.student_outputs)}")
-                    
                     self.d_loss = self.distillation_loss.get_loss()
                     
-                    # Debug: Check the actual loss value before weighting
-                    print(f"Raw distillation loss: {self.d_loss}")
-                    
                     self.d_loss = self.d_loss * distill_weight
-                    print(f"value of loss: {self.loss}, value of d_loss: {self.d_loss.squeeze()}")
+                    # print(f"value of loss: {self.loss}, value of d_loss: {self.d_loss.squeeze()}")
                     self.loss += self.d_loss.squeeze()
-                    # exit()
 
                 # Backward
                 self.scaler.scale(self.loss).backward()
