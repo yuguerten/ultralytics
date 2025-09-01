@@ -8,10 +8,12 @@ import logging
 import os
 import platform
 import re
+import socket
 import subprocess
 import sys
 import threading
 import time
+from functools import lru_cache
 from pathlib import Path
 from threading import Lock
 from types import SimpleNamespace
@@ -43,6 +45,7 @@ VERBOSE = str(os.getenv("YOLO_VERBOSE", True)).lower() == "true"  # global verbo
 LOGGING_NAME = "ultralytics"
 MACOS, LINUX, WINDOWS = (platform.system() == x for x in ["Darwin", "Linux", "Windows"])  # environment booleans
 MACOS_VERSION = platform.mac_ver()[0] if MACOS else None
+NOT_MACOS14 = not (MACOS and MACOS_VERSION.startswith("14."))
 ARM64 = platform.machine() in {"arm64", "aarch64"}  # ARM64 booleans
 PYTHON_VERSION = platform.python_version()
 TORCH_VERSION = torch.__version__
@@ -188,9 +191,10 @@ class DataExportMixin:
             def _to_str_simple(v):
                 if v is None:
                     return ""
-                if isinstance(v, (dict, list, tuple, set)):
+                elif isinstance(v, (dict, list, tuple, set)):
                     return repr(v)
-                return str(v)
+                else:
+                    return str(v)
 
             df_str = df.select(
                 [pl.col(c).map_elements(_to_str_simple, return_dtype=pl.String).alias(c) for c in df.columns]
@@ -412,10 +416,10 @@ def set_logging(name="LOGGING_NAME", verbose=True):
             """Format log records with prefixes based on level."""
             # Apply prefixes based on log level
             if record.levelno == logging.WARNING:
-                prefix = "WARNING ⚠️" if not WINDOWS else "WARNING"
+                prefix = "WARNING" if WINDOWS else "WARNING ⚠️"
                 record.msg = f"{prefix} {record.msg}"
             elif record.levelno == logging.ERROR:
-                prefix = "ERROR ❌" if not WINDOWS else "ERROR"
+                prefix = "ERROR" if WINDOWS else "ERROR ❌"
                 record.msg = f"{prefix} {record.msg}"
 
             # Handle emojis in message based on platform
@@ -426,7 +430,7 @@ def set_logging(name="LOGGING_NAME", verbose=True):
 
     # Handle Windows UTF-8 encoding issues
     if WINDOWS and hasattr(sys.stdout, "encoding") and sys.stdout.encoding != "utf-8":
-        try:
+        with contextlib.suppress(Exception):
             # Attempt to reconfigure stdout to use UTF-8 encoding if possible
             if hasattr(sys.stdout, "reconfigure"):
                 sys.stdout.reconfigure(encoding="utf-8")
@@ -435,8 +439,6 @@ def set_logging(name="LOGGING_NAME", verbose=True):
                 import io
 
                 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
-        except Exception:
-            pass
 
     # Create and configure the StreamHandler with the appropriate formatter and level
     stream_handler = logging.StreamHandler(sys.stdout)
@@ -727,32 +729,45 @@ def is_raspberrypi() -> bool:
     return "rpi" in DEVICE_MODEL
 
 
-def is_jetson() -> bool:
+@lru_cache(maxsize=3)
+def is_jetson(jetpack=None) -> bool:
     """
     Determine if the Python environment is running on an NVIDIA Jetson device.
+
+    Args:
+        jetpack (int | None): If specified, check for specific JetPack version (4, 5, 6).
 
     Returns:
         (bool): True if running on an NVIDIA Jetson device, False otherwise.
     """
-    return "tegra" in DEVICE_MODEL
+    if jetson := ("tegra" in DEVICE_MODEL):
+        if jetpack:
+            try:
+                content = open("/etc/nv_tegra_release").read()
+                version_map = {4: "R32", 5: "R35", 6: "R36"}  # JetPack to L4T major version mapping
+                return jetpack in version_map and version_map[jetpack] in content
+            except Exception:
+                return False
+    return jetson
 
 
 def is_online() -> bool:
     """
-    Check internet connectivity by attempting to connect to a known online host.
+    Fast online check using DNS (v4/v6) resolution (Cloudflare + Google).
 
     Returns:
         (bool): True if connection is successful, False otherwise.
     """
-    try:
-        assert str(os.getenv("YOLO_OFFLINE", "")).lower() != "true"  # check if ENV var YOLO_OFFLINE="True"
-        import socket
-
-        for dns in ("1.1.1.1", "8.8.8.8"):  # check Cloudflare and Google DNS
-            socket.create_connection(address=(dns, 80), timeout=2.0).close()
-            return True
-    except Exception:
+    if str(os.getenv("YOLO_OFFLINE", "")).lower() == "true":
         return False
+
+    for host in ("one.one.one.one", "dns.google"):
+        try:
+            socket.getaddrinfo(host, 0, socket.AF_UNSPEC, 0, 0, socket.AI_ADDRCONFIG)
+            return True
+        except OSError:
+            continue
+    return False
 
 
 def is_pip_package(filepath: str = __name__) -> bool:
@@ -829,6 +844,7 @@ def is_git_dir():
     return GIT_DIR is not None
 
 
+@lru_cache(maxsize=1)
 def get_git_origin_url():
     """
     Retrieve the origin URL of a git repository.
@@ -838,12 +854,14 @@ def get_git_origin_url():
     """
     if IS_GIT_DIR:
         try:
-            origin = subprocess.check_output(["git", "config", "--get", "remote.origin.url"])
-            return origin.decode().strip()
+            return subprocess.check_output(
+                ["git", "config", "--get", "remote.origin.url"], stderr=subprocess.DEVNULL, text=True
+            ).strip()
         except subprocess.CalledProcessError:
             return None
 
 
+@lru_cache(maxsize=1)
 def get_git_branch():
     """
     Return the current git branch name. If not in a git repository, return None.
@@ -853,8 +871,24 @@ def get_git_branch():
     """
     if IS_GIT_DIR:
         try:
-            origin = subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"])
-            return origin.decode().strip()
+            return subprocess.check_output(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"], stderr=subprocess.DEVNULL, text=True
+            ).strip()
+        except subprocess.CalledProcessError:
+            return None
+
+
+@lru_cache(maxsize=1)
+def get_git_commit():
+    """
+    Return the current git commit hash. If not in a git repository, return None.
+
+    Returns:
+        (str | None): The current git commit hash or None if not a git directory.
+    """
+    if IS_GIT_DIR:
+        try:
+            return subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, text=True).strip()
         except subprocess.CalledProcessError:
             return None
 
