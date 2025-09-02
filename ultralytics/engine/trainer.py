@@ -279,7 +279,7 @@ class DistillationLoss:
             modelt (nn.Module): Teacher network wrapped similarly.
             distiller (str): Either 'mgd' or 'cwd' (case-insensitive).
         """
-        self.distiller = distiller.lower()
+        self.distiller = (distiller or "cwd").lower()
         # Predefined layer indices to hook for feature extraction
         self.layers = ["6", "8", "13", "16", "19", "22"]
         self.models = models
@@ -391,7 +391,7 @@ class DistillationLoss:
         # Compute base distillation loss
         loss = self.distill_loss_fn(self.student_outputs, self.teacher_outputs)
 
-        # For MGD, apply extra scaling factor
+        # For MGD, apply extra scaling factor because they are not scaled like with CWD where we applied softmax with T
         if self.distiller != "cwd":
             loss *= 0.3
 
@@ -626,6 +626,10 @@ class BaseTrainer:
         
         # Load teacher model to device
         if self.teacher is not None:
+            if isinstance(self.teacher, str):
+                if self.teacher.endswith('.pt'):
+                    teacher_weights, _ = attempt_load_one_weight(self.teacher)
+                    self.teacher = self.get_model(weights=teacher_weights, verbose=RANK == -1)
             for k, v in self.teacher.named_parameters():
                 v.requires_grad = False
             self.teacher = self.teacher.to(self.device)
@@ -745,6 +749,8 @@ class BaseTrainer:
         
         # make loss
         if self.teacher is not None:
+            if not self.loss_type:
+                self.loss_type = "cwd"
             self.distillation_loss = DistillationLoss(self.model, self.teacher, distiller=self.loss_type)
         else:
             self.distillation_loss = None
@@ -806,7 +812,7 @@ class BaseTrainer:
                     self.tloss = (
                         (self.tloss * i + self.loss_items) / (i + 1) if self.tloss is not None else self.loss_items
                     )
-                # add mor distillation logic
+                # add more distillation logic
                 if self.teacher is not None:
                     distill_weight = ((1 - math.cos(i * math.pi / len(self.train_loader))) / 2) * (0.1 - 1) + 1
                     with torch.no_grad():
@@ -815,9 +821,8 @@ class BaseTrainer:
                     self.d_loss = self.distillation_loss.get_loss()
                     
                     self.d_loss = self.d_loss * distill_weight
-                    # print(f"value of loss: {self.loss}, value of d_loss: {self.d_loss.squeeze()}")
                     self.loss += self.d_loss.squeeze()
-
+                        
                 # Backward
                 self.scaler.scale(self.loss).backward()
 
